@@ -147,19 +147,53 @@ namespace MMOServer.Server
             }
 
             // Valida range (se tiver alvo específico)
-            if (request.targetId != null && template.targetType == "enemy")
+           if (!string.IsNullOrEmpty(request.targetId) && template.targetType == "enemy")
             {
-                var monster = MonsterManager.Instance.GetMonster(int.Parse(request.targetId));
-                if (monster != null)
+                // ✅ Valida se targetId é um número válido
+                if (!int.TryParse(request.targetId, out int monsterId))
                 {
-                    float distance = GetDistance(player.position, monster.position);
-                    if (distance > template.range)
-                    {
-                        result.success = false;
-                        result.failReason = "OUT_OF_RANGE";
-                        return result;
-                    }
+                    Console.WriteLine($"❌ Invalid targetId format: '{request.targetId}'");
+                    result.success = false;
+                    result.failReason = "INVALID_TARGET";
+                    return result;
                 }
+
+                var monster = MonsterManager.Instance.GetMonster(monsterId);
+                
+                if (monster == null)
+                {
+                    Console.WriteLine($"❌ Target monster {monsterId} not found");
+                    result.success = false;
+                    result.failReason = "TARGET_NOT_FOUND";
+                    return result;
+                }
+
+                if (!monster.isAlive)
+                {
+                    Console.WriteLine($"❌ Target monster {monster.template.name} is dead");
+                    result.success = false;
+                    result.failReason = "TARGET_DEAD";
+                    return result;
+                }
+
+                float distance = GetDistance(player.position, monster.position);
+                
+                Console.WriteLine($"📏 Distance to target: {distance:F2}m (max: {template.range}m)");
+                
+                if (distance > template.range)
+                {
+                    result.success = false;
+                    result.failReason = "OUT_OF_RANGE";
+                    return result;
+                }
+            }
+            else if (template.targetType == "Monster")
+            {
+                // ✅ Skill de inimigo sem target selecionado
+                Console.WriteLine($"❌ Skill {template.name} requires a target but none was provided");
+                result.success = false;
+                result.failReason = "NO_TARGET";
+                return result;
             }
 
             // Consome recursos
@@ -186,7 +220,7 @@ namespace MMOServer.Server
         {
             switch (template.targetType)
             {
-                case "enemy":
+                case "Monster":
                     ExecuteSingleTargetSkill(player, template, levelData, request, result, currentTime);
                     break;
 
@@ -207,12 +241,27 @@ namespace MMOServer.Server
         private void ExecuteSingleTargetSkill(Player player, SkillTemplate template, SkillLevelData levelData,
             UseSkillRequest request, SkillResult result, float currentTime)
         {
-            if (request.targetId == null)
+            // ✅ VALIDAÇÃO: TargetId não pode ser null/vazio
+            if (string.IsNullOrEmpty(request.targetId))
+            {
+                Console.WriteLine($"❌ ExecuteSingleTargetSkill: No target ID provided");
                 return;
+            }
 
-            var monster = MonsterManager.Instance.GetMonster(int.Parse(request.targetId));
-            if (monster == null || !monster.isAlive)
+            // ✅ VALIDAÇÃO: Parse seguro do targetId
+            if (!int.TryParse(request.targetId, out int monsterId))
+            {
+                Console.WriteLine($"❌ ExecuteSingleTargetSkill: Invalid targetId format: '{request.targetId}'");
                 return;
+            }
+
+            var monster = MonsterManager.Instance.GetMonster(monsterId);
+            
+            if (monster == null || !monster.isAlive)
+            {
+                Console.WriteLine($"❌ ExecuteSingleTargetSkill: Monster {monsterId} not found or dead");
+                return;
+            }
 
             var targetResult = CalculateSkillDamage(player, monster, template, levelData);
             
