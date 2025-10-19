@@ -921,120 +921,97 @@ private static string HandleUseSkill(JObject json, string sessionId)
         Console.WriteLine($"   Target Type: {targetType}");
 
         // ✅ VALIDAÇÃO: Skill ID
-        if (skillId == 0)
+         if (skillId == 0)
         {
-            Console.WriteLine("❌ Invalid skill ID");
             return JsonConvert.SerializeObject(new 
             { 
                 type = "skillUseFailed",
                 skillId = 0,
-                reason = "INVALID_SKILL_ID",
-                message = "ID de skill inválido"
+                reason = "INVALID_SKILL_ID"
             });
         }
 
-        // ✅ VALIDAÇÃO: Player existe
-        var player = PlayerManager.Instance.GetPlayer(sessionId);
-        
-        if (player == null)
+        if (string.IsNullOrEmpty(targetId))
         {
-            Console.WriteLine($"❌ Player not found: {sessionId}");
-            return JsonConvert.SerializeObject(new 
-            { 
-                type = "error", 
-                message = "Player not found" 
-            });
-        }
-
-        Console.WriteLine($"✅ Player found: {player.character.nome}");
-
-        // ✅ VALIDAÇÃO: Player morto
-        if (player.character.isDead)
-        {
-            Console.WriteLine($"❌ Player is dead: {player.character.nome}");
             return JsonConvert.SerializeObject(new 
             { 
                 type = "skillUseFailed",
                 skillId = skillId,
-                reason = "PLAYER_DEAD",
-                message = "Você não pode usar skills enquanto está morto"
+                reason = "NO_TARGET"
             });
         }
 
-        // ✅ Cria request structure
+        var player = PlayerManager.Instance.GetPlayer(sessionId);
+        
+        if (player == null)
+        {
+            return JsonConvert.SerializeObject(new { type = "error", message = "Player not found" });
+        }
+
+        if (player.character.isDead)
+        {
+            return JsonConvert.SerializeObject(new 
+            { 
+                type = "skillUseFailed",
+                skillId = skillId,
+                reason = "PLAYER_DEAD"
+            });
+        }
+
+        // Cria request
         var request = new UseSkillRequest
         {
             skillId = skillId,
             slotNumber = slotNumber,
             targetId = targetId,
-            targetType = targetType,
-            targetPosition = json["targetPosition"]?.ToObject<Position>()
+            targetType = "monster",
+            targetPosition = null
         };
 
-        // ✅ Calcula tempo atual do servidor
-        float currentTime = (float)(DateTime.UtcNow - new DateTime(2025, 1, 1)).TotalSeconds;
+        // ✅ CORRIGIDO: Usa tempo do SkillManager
+        float currentTime = SkillManager.GetServerTime();
 
-        Console.WriteLine($"⏰ Server time: {currentTime:F2}");
+        Console.WriteLine($"⏰ Server time: {currentTime:F2}s");
 
-        // ✅ USA A SKILL
+        // Usa a skill
         var result = SkillManager.Instance.UseSkill(player, request, currentTime);
 
-        Console.WriteLine($"🎯 Skill use result: Success={result.success}, Reason={result.failReason}");
+        Console.WriteLine($"🎯 Result: Success={result.success}, Reason={result.failReason}");
 
         if (result.success)
         {
-            Console.WriteLine($"✅ {player.character.nome} used skill {skillId}");
-            Console.WriteLine($"   Mana Cost: {result.manaCost}");
-            Console.WriteLine($"   Health Cost: {result.healthCost}");
+            Console.WriteLine($"✅ Skill used successfully");
             Console.WriteLine($"   Targets Hit: {result.targets.Count}");
 
-            // Log targets
             foreach (var target in result.targets)
             {
-                Console.WriteLine($"   → Target: {target.targetName}");
-                Console.WriteLine($"      Damage: {target.damage}");
-                Console.WriteLine($"      Healing: {target.healing}");
-                Console.WriteLine($"      Critical: {target.isCritical}");
-                Console.WriteLine($"      Died: {target.targetDied}");
+                Console.WriteLine($"   → {target.targetName}: {target.damage} dmg (Crit: {target.isCritical})");
             }
 
-            // ✅ Atualiza stats do player
             DatabaseHandler.Instance.UpdateCharacter(player.character);
-
-            // ✅ Broadcast stats update (HP/MP)
             WorldManager.Instance.BroadcastPlayerStatsUpdate(player);
             
-            // ✅ Broadcast resultado da skill
             var message = new
             {
                 type = "skillUsed",
                 result = result
             };
 
-            Console.WriteLine("📡 Broadcasting skill result to all players");
-
             return "BROADCAST:" + JsonConvert.SerializeObject(message);
         }
         else
         {
-            // Skill falhou
-            Console.WriteLine($"❌ Skill use failed: {result.failReason}");
+            Console.WriteLine($"❌ Skill failed: {result.failReason}");
 
-            // Mensagens amigáveis
             string friendlyMessage = result.failReason switch
             {
                 "COOLDOWN" => "Skill em cooldown!",
                 "NO_MANA" => "Mana insuficiente!",
                 "NO_HEALTH" => "HP insuficiente!",
                 "OUT_OF_RANGE" => "Alvo muito longe!",
-                "SKILL_NOT_LEARNED" => "Você não aprendeu esta skill!",
-                "INVALID_LEVEL" => "Nível de skill inválido!",
-                "SKILL_NOT_FOUND" => "Skill não encontrada!",
-                "NO_TARGET" => "Selecione um alvo primeiro!",          // ✅ NOVO
-                "TARGET_NOT_FOUND" => "Alvo não encontrado!",           // ✅ NOVO
-                "TARGET_DEAD" => "Alvo já está morto!",                 // ✅ NOVO
-                "INVALID_TARGET" => "Alvo inválido!",                   // ✅ NOVO
-                _ => $"Não foi possível usar a skill ({result.failReason})"
+                "TARGET_NOT_FOUND" => "Monstro não encontrado!",
+                "TARGET_DEAD" => "Monstro já está morto!",
+                _ => $"Não foi possível usar a skill"
             };
 
             return JsonConvert.SerializeObject(new
@@ -1048,14 +1025,8 @@ private static string HandleUseSkill(JObject json, string sessionId)
     }
     catch (Exception ex)
     {
-        Console.WriteLine($"❌ EXCEPTION in HandleUseSkill: {ex.Message}");
-        Console.WriteLine($"   Stack: {ex.StackTrace}");
-
-        return JsonConvert.SerializeObject(new 
-        { 
-            type = "error", 
-            message = $"Erro ao processar skill: {ex.Message}" 
-        });
+        Console.WriteLine($"❌ EXCEPTION: {ex.Message}");
+        return JsonConvert.SerializeObject(new { type = "error", message = ex.Message });
     }
 }
 
