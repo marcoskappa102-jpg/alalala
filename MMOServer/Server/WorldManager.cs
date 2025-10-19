@@ -58,25 +58,19 @@ private void OnWorldUpdate(object? sender, ElapsedEventArgs e)
     {
         long currentTimeMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
         
-        float currentTime = (float)(DateTime.UtcNow - serverStartTime).TotalSeconds;
+        // ✅ CORRIGIDO: Usa tempo consistente do SkillManager
+        float currentTime = SkillManager.GetServerTime();
         float deltaTime = UPDATE_INTERVAL / 1000f;
 
-        // 1. Atualiza movimento de players
         PlayerManager.Instance.UpdateAllPlayersMovement(deltaTime);
-        
-        // 2. Processa combate automático
         ProcessPlayerCombat(currentTime, deltaTime);
-        
-        // 3. Atualiza monstros (AI e combate)
         MonsterManager.Instance.Update(deltaTime, currentTime);
         
-        // 🆕 4. Atualiza efeitos de skills (buffs/debuffs)
+        // ✅ Atualiza efeitos de skills
         SkillManager.Instance.UpdateActiveEffects(currentTime);
         
-        // 5. Broadcast do estado do mundo
         BroadcastWorldState();
         
-        // 6. Salva periodicamente
         if (currentTimeMs - lastSaveTime >= SAVE_INTERVAL)
         {
             SaveWorldState();
