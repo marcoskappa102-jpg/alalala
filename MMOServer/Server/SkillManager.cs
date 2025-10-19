@@ -1,663 +1,606 @@
-using MMOServer.Models;
+using UnityEngine;
+using System.Collections.Generic;
+using System.Linq;
 using Newtonsoft.Json;
-using System.Collections.Concurrent;
 
-namespace MMOServer.Server
+namespace MMOClient.Skills
 {
     /// <summary>
-    /// Gerenciador de Skills - Sistema completo de habilidades
+    /// Gerenciador de Skills no Cliente
     /// </summary>
-    public class SkillManager
+    public class SkillManager : MonoBehaviour
     {
-        private static SkillManager? instance;
-        public static SkillManager Instance
+        public static SkillManager Instance { get; private set; }
+
+        [Header("Configurações")]
+        public KeyCode[] skillSlotKeys = new KeyCode[]
         {
-            get
+            KeyCode.Alpha1, KeyCode.Alpha2, KeyCode.Alpha3,
+            KeyCode.Alpha4, KeyCode.Alpha5, KeyCode.Alpha6,
+            KeyCode.Alpha7, KeyCode.Alpha8, KeyCode.Alpha9
+        };
+
+        // Skills aprendidas pelo jogador
+        private List<LearnedSkill> learnedSkills = new List<LearnedSkill>();
+        
+        // Skills mapeadas por slot (1-9)
+        private Dictionary<int, LearnedSkill> skillSlots = new Dictionary<int, LearnedSkill>();
+        
+        // Cooldowns visuais
+        private Dictionary<int, float> cooldownTimers = new Dictionary<int, float>();
+        
+        // Casting
+        private bool isCasting = false;
+        private float castingStartTime = 0f;
+        private float castingDuration = 0f;
+        private LearnedSkill currentCastingSkill = null;
+
+        private void Awake()
+        {
+            if (Instance == null)
             {
-                if (instance == null)
-                    instance = new SkillManager();
-                return instance;
+                Instance = this;
+                DontDestroyOnLoad(gameObject);
+            }
+            else
+            {
+                Destroy(gameObject);
             }
         }
 
-        private Dictionary<int, SkillTemplate> skillTemplates = new Dictionary<int, SkillTemplate>();
-        private ConcurrentDictionary<string, List<ActiveEffect>> activeEffects = new ConcurrentDictionary<string, List<ActiveEffect>>();
-        private Random random = new Random();
-        private int nextEffectId = 1;
-
-        public void Initialize()
+        private void Start()
         {
-            Console.WriteLine("⚔️ SkillManager: Initializing...");
-            LoadSkillTemplates();
-            Console.WriteLine($"✅ SkillManager: Loaded {skillTemplates.Count} skill templates");
+            // Registra eventos do MessageHandler
+            if (MessageHandler.Instance != null)
+            {
+                MessageHandler.Instance.OnMessageReceived += HandleSkillMessages;
+            }
         }
 
-        // ==================== CONFIGURAÇÃO ====================
-
-        private void LoadSkillTemplates()
+        private void Update()
         {
-            string filePath = Path.Combine("Config", "skills.json");
-
-            if (!File.Exists(filePath))
+            // Input de skills (1-9)
+            for (int i = 0; i < skillSlotKeys.Length; i++)
             {
-                Console.WriteLine($"⚠️ {filePath} not found!");
-                return;
-            }
-
-            try
-            {
-                string json = File.ReadAllText(filePath);
-                var config = JsonConvert.DeserializeObject<SkillConfig>(json);
-
-                if (config?.skills != null)
+                if (Input.GetKeyDown(skillSlotKeys[i]))
                 {
-                    foreach (var skill in config.skills)
-                    {
-                        skillTemplates[skill.id] = skill;
-                    }
-                    Console.WriteLine($"✅ Loaded {skillTemplates.Count} skills");
+                    int slotNumber = i + 1;
+                    TryUseSkill(slotNumber);
                 }
             }
-            catch (Exception ex)
-            {
-                Console.WriteLine($"❌ Error loading skills: {ex.Message}");
-            }
-        }
 
-        public SkillTemplate? GetSkillTemplate(int skillId)
-        {
-            skillTemplates.TryGetValue(skillId, out var template);
-            return template;
+            // Atualiza casting
+            UpdateCasting();
         }
-
-        public List<SkillTemplate> GetSkillsByClass(string className)
-        {
-            return skillTemplates.Values
-                .Where(s => s.requiredClass == className)
-                .OrderBy(s => s.requiredLevel)
-                .ThenBy(s => s.id)
-                .ToList();
-        }
-
-        // ==================== USO DE SKILLS ====================
 
         /// <summary>
-        /// Usa uma skill
+        /// Carrega skills do personagem
         /// </summary>
-        public SkillResult UseSkill(Player player, UseSkillRequest request, float currentTime)
+        public void LoadSkills(List<LearnedSkill> skills)
         {
-            var result = new SkillResult
+            learnedSkills = skills ?? new List<LearnedSkill>();
+            
+            // Mapeia skills por slot
+            skillSlots.Clear();
+            foreach (var skill in learnedSkills)
             {
-                attackerId = player.sessionId,
-                attackerName = player.character.nome,
-                attackerType = "player"
-            };
-
-            // Valida skill aprendida
-            var learnedSkill = player.character.learnedSkills?
-                .FirstOrDefault(s => s.skillId == request.skillId);
-
-            if (learnedSkill == null)
-            {
-                result.success = false;
-                result.failReason = "SKILL_NOT_LEARNED";
-                return result;
-            }
-
-            // Carrega template
-            var template = GetSkillTemplate(request.skillId);
-            if (template == null)
-            {
-                result.success = false;
-                result.failReason = "SKILL_NOT_FOUND";
-                return result;
-            }
-
-            learnedSkill.template = template;
-
-            // Valida cooldown
-            if (!CanUseSkill(player, learnedSkill, currentTime))
-            {
-                result.success = false;
-                result.failReason = "COOLDOWN";
-                return result;
-            }
-
-            // Valida custos
-            var levelData = GetSkillLevelData(template, learnedSkill.currentLevel);
-            if (levelData == null)
-            {
-                result.success = false;
-                result.failReason = "INVALID_LEVEL";
-                return result;
-            }
-
-            if (player.character.mana < template.manaCost)
-            {
-                result.success = false;
-                result.failReason = "NO_MANA";
-                return result;
-            }
-
-            if (player.character.health <= template.healthCost)
-            {
-                result.success = false;
-                result.failReason = "NO_HEALTH";
-                return result;
-            }
-
-            // Valida range (se tiver alvo específico)
-           if (!string.IsNullOrEmpty(request.targetId) && template.targetType == "enemy")
-            {
-                // ✅ Valida se targetId é um número válido
-                if (!int.TryParse(request.targetId, out int monsterId))
+                if (skill.slotNumber >= 1 && skill.slotNumber <= 9)
                 {
-                    Console.WriteLine($"❌ Invalid targetId format: '{request.targetId}'");
-                    result.success = false;
-                    result.failReason = "INVALID_TARGET";
-                    return result;
-                }
-
-                var monster = MonsterManager.Instance.GetMonster(monsterId);
-                
-                if (monster == null)
-                {
-                    Console.WriteLine($"❌ Target monster {monsterId} not found");
-                    result.success = false;
-                    result.failReason = "TARGET_NOT_FOUND";
-                    return result;
-                }
-
-                if (!monster.isAlive)
-                {
-                    Console.WriteLine($"❌ Target monster {monster.template.name} is dead");
-                    result.success = false;
-                    result.failReason = "TARGET_DEAD";
-                    return result;
-                }
-
-                float distance = GetDistance(player.position, monster.position);
-                
-                Console.WriteLine($"📏 Distance to target: {distance:F2}m (max: {template.range}m)");
-                
-                if (distance > template.range)
-                {
-                    result.success = false;
-                    result.failReason = "OUT_OF_RANGE";
-                    return result;
+                    skillSlots[skill.slotNumber] = skill;
                 }
             }
-            else if (template.targetType == "Monster")
+
+            Debug.Log($"✅ Loaded {learnedSkills.Count} skills");
+            
+            // Atualiza UI
+            if (SkillbarUI.Instance != null)
             {
-                // ✅ Skill de inimigo sem target selecionado
-                Console.WriteLine($"❌ Skill {template.name} requires a target but none was provided");
-                result.success = false;
-                result.failReason = "NO_TARGET";
-                return result;
-            }
-
-            // Consome recursos
-            player.character.mana -= template.manaCost;
-            player.character.health -= template.healthCost;
-            result.manaCost = template.manaCost;
-            result.healthCost = template.healthCost;
-
-            // Atualiza cooldown
-            learnedSkill.lastUsedTime = (long)(currentTime * 1000);
-
-            // Executa skill
-            result.success = true;
-            ExecuteSkill(player, template, levelData, request, result, currentTime);
-
-            // Salva alterações
-            DatabaseHandler.Instance.UpdateCharacter(player.character);
-
-            return result;
-        }
-
-        private void ExecuteSkill(Player player, SkillTemplate template, SkillLevelData levelData, 
-            UseSkillRequest request, SkillResult result, float currentTime)
-        {
-            switch (template.targetType)
-            {
-                case "Monster":
-                    ExecuteSingleTargetSkill(player, template, levelData, request, result, currentTime);
-                    break;
-
-                case "area":
-                    ExecuteAreaSkill(player, template, levelData, request, result, currentTime);
-                    break;
-
-                case "self":
-                    ExecuteSelfSkill(player, template, levelData, result, currentTime);
-                    break;
-
-                case "ally":
-                    ExecuteAllySkill(player, template, levelData, request, result, currentTime);
-                    break;
+                SkillbarUI.Instance.RefreshSkillbar(skillSlots);
             }
         }
 
-        private void ExecuteSingleTargetSkill(Player player, SkillTemplate template, SkillLevelData levelData,
-            UseSkillRequest request, SkillResult result, float currentTime)
+        /// <summary>
+        /// Tenta usar skill no slot
+        /// </summary>
+        public void TryUseSkill(int slotNumber)
         {
-            // ✅ VALIDAÇÃO: TargetId não pode ser null/vazio
-            if (string.IsNullOrEmpty(request.targetId))
+            if (!skillSlots.TryGetValue(slotNumber, out var skill))
             {
-                Console.WriteLine($"❌ ExecuteSingleTargetSkill: No target ID provided");
+                Debug.Log($"⚠️ No skill in slot {slotNumber}");
                 return;
             }
 
-            // ✅ VALIDAÇÃO: Parse seguro do targetId
-            if (!int.TryParse(request.targetId, out int monsterId))
+            if (skill.template == null)
             {
-                Console.WriteLine($"❌ ExecuteSingleTargetSkill: Invalid targetId format: '{request.targetId}'");
+                Debug.LogWarning($"⚠️ Skill {skill.skillId} has no template!");
                 return;
             }
 
-            var monster = MonsterManager.Instance.GetMonster(monsterId);
-            
-            if (monster == null || !monster.isAlive)
-            {
-                Console.WriteLine($"❌ ExecuteSingleTargetSkill: Monster {monsterId} not found or dead");
+            // Valida se pode usar
+            if (!CanUseSkill(skill))
                 return;
+
+            // Inicia casting (se tiver)
+            if (skill.template.castTime > 0f)
+            {
+                StartCasting(skill);
             }
-
-            var targetResult = CalculateSkillDamage(player, monster, template, levelData);
-            
-            // Aplica dano
-            int actualDamage = monster.TakeDamage(targetResult.damage);
-            targetResult.damage = actualDamage;
-            targetResult.remainingHealth = monster.currentHealth;
-            targetResult.targetDied = !monster.isAlive;
-
-            // XP e level up
-            if (targetResult.targetDied)
+            else
             {
-                int exp = CombatManager.Instance.CalculateExperienceReward(
-                    player.character.level, monster.template.level, monster.template.experienceReward);
-                bool leveledUp = player.character.GainExperience(exp);
-
-                targetResult.experienceGained = exp;
-                targetResult.leveledUp = leveledUp;
-                targetResult.newLevel = player.character.level;
-
-                Console.WriteLine($"💀 {monster.template.name} killed by {template.name}! +{exp} XP");
-            }
-
-            // Aplica efeitos
-            ApplySkillEffects(player, monster, template, targetResult, currentTime);
-
-            result.targets.Add(targetResult);
-        }
-
-        private void ExecuteAreaSkill(Player player, SkillTemplate template, SkillLevelData levelData,
-            UseSkillRequest request, SkillResult result, float currentTime)
-        {
-            Position center = request.targetPosition ?? player.position;
-
-            // Busca todos os monstros vivos
-            var monsters = MonsterManager.Instance.GetAliveMonsters();
-
-            foreach (var monster in monsters)
-            {
-                float distance = GetDistance(center, monster.position);
-                
-                if (distance <= template.areaRadius)
-                {
-                    var targetResult = CalculateSkillDamage(player, monster, template, levelData);
-                    
-                    int actualDamage = monster.TakeDamage(targetResult.damage);
-                    targetResult.damage = actualDamage;
-                    targetResult.remainingHealth = monster.currentHealth;
-                    targetResult.targetDied = !monster.isAlive;
-
-                    if (targetResult.targetDied)
-                    {
-                        int exp = CombatManager.Instance.CalculateExperienceReward(
-                            player.character.level, monster.template.level, monster.template.experienceReward);
-                        bool leveledUp = player.character.GainExperience(exp);
-
-                        targetResult.experienceGained = exp;
-                        targetResult.leveledUp = leveledUp;
-                        targetResult.newLevel = player.character.level;
-                    }
-
-                    ApplySkillEffects(player, monster, template, targetResult, currentTime);
-
-                    result.targets.Add(targetResult);
-                }
-            }
-
-            Console.WriteLine($"💥 {template.name} hit {result.targets.Count} targets in area!");
-        }
-
-        private void ExecuteSelfSkill(Player player, SkillTemplate template, SkillLevelData levelData,
-            SkillResult result, float currentTime)
-        {
-            var targetResult = new SkillTargetResult
-            {
-                targetId = player.sessionId,
-                targetName = player.character.nome,
-                targetType = "player"
-            };
-
-            // Cura
-            if (levelData.baseHealing > 0)
-            {
-                int healing = CalculateHealing(player, template, levelData);
-                player.character.health = Math.Min(player.character.health + healing, player.character.maxHealth);
-                targetResult.healing = healing;
-                targetResult.remainingHealth = player.character.health;
-            }
-
-            // Aplica buffs em si mesmo
-            foreach (var effect in template.effects)
-            {
-                if (effect.effectType == "buff_stat")
-                {
-                    ApplyBuff(player.sessionId, player.sessionId, template.id, effect, currentTime);
-                    
-                    targetResult.appliedEffects.Add(new AppliedEffect
-                    {
-                        effectType = effect.effectType,
-                        value = effect.value,
-                        duration = effect.duration
-                    });
-                }
-            }
-
-            result.targets.Add(targetResult);
-        }
-
-        private void ExecuteAllySkill(Player player, SkillTemplate template, SkillLevelData levelData,
-            UseSkillRequest request, SkillResult result, float currentTime)
-        {
-            // Por enquanto, usa em si mesmo
-            // TODO: Implementar target de aliados quando houver party system
-            ExecuteSelfSkill(player, template, levelData, result, currentTime);
-        }
-
-        // ==================== CÁLCULOS ====================
-
-        private SkillTargetResult CalculateSkillDamage(Player player, MonsterInstance monster, 
-            SkillTemplate template, SkillLevelData levelData)
-        {
-            var result = new SkillTargetResult
-            {
-                targetId = monster.id.ToString(),
-                targetName = monster.template.name,
-                targetType = "monster"
-            };
-
-            // Calcula dano base
-            int baseDamage = levelData.baseDamage;
-
-            // Multiplica por ATK ou MATK
-            int attackPower = template.damageType == "magical" 
-                ? player.character.magicPower 
-                : player.character.attackPower;
-
-            int scaledDamage = (int)(attackPower * levelData.damageMultiplier);
-            int totalDamage = baseDamage + scaledDamage;
-
-            // Crítico
-            float critChance = template.damageType == "magical"
-                ? 0.05f // Magos têm menos crítico base
-                : 0.01f + (player.character.dexterity * 0.003f);
-            
-            critChance += levelData.critChanceBonus;
-
-            result.isCritical = random.NextDouble() < critChance;
-            if (result.isCritical)
-            {
-                totalDamage = (int)(totalDamage * 1.5f);
-            }
-
-            // Redução de defesa
-            int defense = monster.template.defense;
-            float defReduction = 1.0f - (defense / (float)(defense + 100));
-            defReduction = Math.Max(defReduction, 0.1f);
-
-            totalDamage = (int)(totalDamage * defReduction);
-            totalDamage = Math.Max(1, totalDamage); // Mínimo 1
-
-            result.damage = totalDamage;
-
-            return result;
-        }
-
-        private int CalculateHealing(Player player, SkillTemplate template, SkillLevelData levelData)
-        {
-            int baseHealing = levelData.baseHealing;
-            int scaledHealing = (int)(player.character.magicPower * levelData.damageMultiplier);
-            return baseHealing + scaledHealing;
-        }
-
-        // ==================== EFEITOS E BUFFS ====================
-
-        private void ApplySkillEffects(Player player, MonsterInstance monster, SkillTemplate template,
-            SkillTargetResult targetResult, float currentTime)
-        {
-            foreach (var effect in template.effects)
-            {
-                if (random.NextDouble() <= effect.chance)
-                {
-                    switch (effect.effectType)
-                    {
-                        case "stun":
-                            // TODO: Implementar stun
-                            break;
-
-                        case "dot": // Damage over time
-                            // TODO: Implementar DOT
-                            break;
-                    }
-
-                    targetResult.appliedEffects.Add(new AppliedEffect
-                    {
-                        effectType = effect.effectType,
-                        value = effect.value,
-                        duration = effect.duration
-                    });
-                }
+                ExecuteSkill(skill);
             }
         }
 
-        private void ApplyBuff(string targetId, string sourceId, int skillId, SkillEffect effect, float currentTime)
+        /// <summary>
+        /// Verifica se pode usar skill
+        /// </summary>
+public bool CanUseSkill(LearnedSkill skill)
+{
+    if (isCasting)
+    {
+        if (UIManager.Instance != null)
         {
-            if (!activeEffects.ContainsKey(targetId))
-            {
-                activeEffects[targetId] = new List<ActiveEffect>();
-            }
-
-            var activeEffect = new ActiveEffect
-            {
-                id = nextEffectId++,
-                skillId = skillId,
-                effectType = effect.effectType,
-                targetStat = effect.targetStat,
-                value = effect.value,
-                startTime = currentTime,
-                duration = effect.duration,
-                sourceId = sourceId
-            };
-
-            activeEffects[targetId].Add(activeEffect);
-
-            Console.WriteLine($"✨ Buff applied: {effect.targetStat} +{effect.value} for {effect.duration}s");
+            UIManager.Instance.AddCombatLog("<color=yellow>⏳ Já está conjurando outra skill!</color>");
         }
+        return false;
+    }
 
-        public void UpdateActiveEffects(float currentTime)
+    float currentTime = Time.time;
+    if (skill.IsOnCooldown(currentTime))
+    {
+        float remaining = skill.GetCooldownRemaining(currentTime);
+        
+        if (UIManager.Instance != null)
         {
-            foreach (var kvp in activeEffects)
-            {
-                var effects = kvp.Value;
-                effects.RemoveAll(e => e.IsExpired(currentTime));
-
-                if (effects.Count == 0)
-                {
-                    activeEffects.TryRemove(kvp.Key, out _);
-                }
-            }
+            UIManager.Instance.AddCombatLog($"<color=orange>⏳ {skill.template.name} em cooldown ({remaining:F1}s)</color>");
         }
+        return false;
+    }
 
-        public List<ActiveEffect> GetActiveEffects(string playerId)
+    if (WorldManager.Instance != null)
+    {
+        var charData = WorldManager.Instance.GetLocalCharacterData();
+        
+        if (charData != null && charData.mana < skill.template.manaCost)
         {
-            if (activeEffects.TryGetValue(playerId, out var effects))
+            if (UIManager.Instance != null)
             {
-                return effects.ToList();
+                UIManager.Instance.AddCombatLog($"<color=cyan>⚠️ Mana insuficiente! ({charData.mana}/{skill.template.manaCost})</color>");
             }
-            return new List<ActiveEffect>();
-        }
-
-        // ==================== APRENDIZADO DE SKILLS ====================
-
-        public bool LearnSkill(Player player, int skillId, int slotNumber)
-        {
-            var template = GetSkillTemplate(skillId);
-            
-            if (template == null)
-            {
-                Console.WriteLine($"❌ Skill {skillId} not found");
-                return false;
-            }
-
-            // Valida requisitos
-            if (player.character.level < template.requiredLevel)
-            {
-                Console.WriteLine($"❌ Level too low: {player.character.level} < {template.requiredLevel}");
-                return false;
-            }
-
-            if (!string.IsNullOrEmpty(template.requiredClass) && 
-                template.requiredClass != player.character.classe)
-            {
-                Console.WriteLine($"❌ Wrong class: {player.character.classe} != {template.requiredClass}");
-                return false;
-            }
-
-            // Verifica se já aprendeu
-            if (player.character.learnedSkills == null)
-            {
-                player.character.learnedSkills = new List<LearnedSkill>();
-            }
-
-            var existing = player.character.learnedSkills.FirstOrDefault(s => s.skillId == skillId);
-            if (existing != null)
-            {
-                Console.WriteLine($"❌ Skill {template.name} already learned");
-                return false;
-            }
-
-            // Valida slot (1-9)
-            if (slotNumber < 1 || slotNumber > 9)
-            {
-                Console.WriteLine($"❌ Invalid slot: {slotNumber}");
-                return false;
-            }
-
-            // Remove skill anterior do slot
-            var oldSkillInSlot = player.character.learnedSkills.FirstOrDefault(s => s.slotNumber == slotNumber);
-            if (oldSkillInSlot != null)
-            {
-                oldSkillInSlot.slotNumber = 0; // Remove do slot
-            }
-
-            // Adiciona skill
-            var learnedSkill = new LearnedSkill
-            {
-                skillId = skillId,
-                currentLevel = 1,
-                slotNumber = slotNumber,
-                lastUsedTime = 0
-            };
-
-            player.character.learnedSkills.Add(learnedSkill);
-            DatabaseHandler.Instance.UpdateCharacter(player.character);
-
-            Console.WriteLine($"✅ {player.character.nome} learned {template.name} (Slot {slotNumber})");
-            return true;
-        }
-
-        public bool LevelUpSkill(Player player, int skillId)
-        {
-            var learnedSkill = player.character.learnedSkills?.FirstOrDefault(s => s.skillId == skillId);
-            
-            if (learnedSkill == null)
-            {
-                Console.WriteLine($"❌ Skill not learned");
-                return false;
-            }
-
-            var template = GetSkillTemplate(skillId);
-            if (template == null)
-                return false;
-
-            if (learnedSkill.currentLevel >= template.maxLevel)
-            {
-                Console.WriteLine($"❌ Skill already at max level");
-                return false;
-            }
-
-            var nextLevelData = GetSkillLevelData(template, learnedSkill.currentLevel + 1);
-            if (nextLevelData == null)
-                return false;
-
-            if (player.character.statusPoints < nextLevelData.statusPointCost)
-            {
-                Console.WriteLine($"❌ Not enough status points: {player.character.statusPoints} < {nextLevelData.statusPointCost}");
-                return false;
-            }
-
-            // Consome status points
-            player.character.statusPoints -= nextLevelData.statusPointCost;
-            learnedSkill.currentLevel++;
-
-            DatabaseHandler.Instance.UpdateCharacter(player.character);
-
-            Console.WriteLine($"✅ {template.name} leveled up to {learnedSkill.currentLevel}!");
-            return true;
-        }
-
-        // ==================== VALIDAÇÕES ====================
-
-        private bool CanUseSkill(Player player, LearnedSkill learnedSkill, float currentTime)
-        {
-            if (learnedSkill.template == null)
-                return false;
-
-            float cooldown = learnedSkill.template.cooldown;
-            float lastUsed = learnedSkill.lastUsedTime / 1000f;
-            float timeSinceLastUse = currentTime - lastUsed;
-
-            return timeSinceLastUse >= cooldown;
-        }
-
-        private SkillLevelData? GetSkillLevelData(SkillTemplate template, int level)
-        {
-            return template.levels.FirstOrDefault(l => l.level == level);
-        }
-
-        private float GetDistance(Position pos1, Position pos2)
-        {
-            float dx = pos1.x - pos2.x;
-            float dz = pos1.z - pos2.z;
-            return (float)Math.Sqrt(dx * dx + dz * dz);
-        }
-
-        public void ReloadConfigs()
-        {
-            Console.WriteLine("🔄 Reloading skill configurations...");
-            skillTemplates.Clear();
-            LoadSkillTemplates();
-            Console.WriteLine("✅ Skill configurations reloaded!");
+            return false;
         }
     }
 
-    [Serializable]
-    public class SkillConfig
+    // ✅ VALIDAÇÃO DE TARGET (movida para ExecuteSkill para não bloquear self/area skills)
+    return true;
+}
+
+
+        /// <summary>
+        /// Inicia casting da skill
+        /// </summary>
+        private void StartCasting(LearnedSkill skill)
+        {
+            isCasting = true;
+            castingStartTime = Time.time;
+            castingDuration = skill.template.castTime;
+            currentCastingSkill = skill;
+
+            Debug.Log($"🔮 Casting {skill.template.name} ({castingDuration}s)...");
+
+            // Atualiza UI de casting
+            if (SkillbarUI.Instance != null)
+            {
+                SkillbarUI.Instance.ShowCastBar(skill.template.name, castingDuration);
+            }
+
+            if (UIManager.Instance != null)
+            {
+                UIManager.Instance.AddCombatLog($"<color=magenta>🔮 Conjurando {skill.template.name}...</color>");
+            }
+        }
+
+        /// <summary>
+        /// Atualiza casting
+        /// </summary>
+        private void UpdateCasting()
+        {
+            if (!isCasting)
+                return;
+
+            float elapsed = Time.time - castingStartTime;
+            float progress = elapsed / castingDuration;
+
+            // Atualiza barra de casting
+            if (SkillbarUI.Instance != null)
+            {
+                SkillbarUI.Instance.UpdateCastBar(progress);
+            }
+
+            // Completo?
+            if (elapsed >= castingDuration)
+            {
+                CompleteCasting();
+            }
+        }
+
+        /// <summary>
+        /// Completa casting e executa skill
+        /// </summary>
+        private void CompleteCasting()
+        {
+            if (currentCastingSkill != null)
+            {
+                ExecuteSkill(currentCastingSkill);
+            }
+
+            CancelCasting();
+        }
+
+        /// <summary>
+        /// Cancela casting
+        /// </summary>
+        public void CancelCasting()
+        {
+            isCasting = false;
+            castingStartTime = 0f;
+            castingDuration = 0f;
+            currentCastingSkill = null;
+
+            if (SkillbarUI.Instance != null)
+            {
+                SkillbarUI.Instance.HideCastBar();
+            }
+        }
+
+        /// <summary>
+        /// Executa skill (envia para servidor)
+        /// </summary>
+private void ExecuteSkill(LearnedSkill skill)
+{
+    if (skill == null || skill.template == null)
     {
-        public List<SkillTemplate> skills { get; set; } = new List<SkillTemplate>();
+        Debug.LogError("❌ ExecuteSkill: Skill or template is null!");
+        return;
+    }
+
+    // ✅ CORREÇÃO: Valida target ANTES de enviar ao servidor
+    string targetId = null;
+    string targetType = null;
+    
+    Debug.Log($"🔍 ExecuteSkill: {skill.template.name} (Type: {skill.template.targetType})");
+
+    if (skill.template.targetType == "enemy")
+    {
+        var player = GetLocalPlayer();
+        
+        if (player == null)
+        {
+            Debug.LogError("❌ Local player not found!");
+            
+            if (UIManager.Instance != null)
+            {
+                UIManager.Instance.AddCombatLog($"<color=red>⚠️ Erro: Jogador não encontrado!</color>");
+            }
+            return;
+        }
+
+        // ✅ CRÍTICO: Verifica se tem target ANTES
+        if (!player.targetMonsterId.HasValue)
+        {
+            Debug.LogWarning($"⚠️ No target selected for skill {skill.template.name}");
+            
+            if (UIManager.Instance != null)
+            {
+                UIManager.Instance.AddCombatLog($"<color=red>⚠️ Selecione um alvo primeiro!</color>");
+            }
+            
+            // ✅ CANCELA CASTING SE HOUVER
+            if (SkillbarUI.Instance != null)
+            {
+                SkillbarUI.Instance.HideCastBar();
+            }
+            
+            return; // ❌ NÃO ENVIA REQUEST SEM TARGET
+        }
+
+        targetId = player.targetMonsterId.Value.ToString();
+        targetType = "monster";
+        Debug.Log($"✅ Target found: Monster ID {targetId}");
+    }
+    else if (skill.template.targetType == "self")
+    {
+        var player = GetLocalPlayer();
+        if (player != null)
+        {
+            targetId = player.playerId;
+            targetType = "player";
+            Debug.Log($"✅ Self-target: Player {targetId}");
+        }
+    }
+    else if (skill.template.targetType == "area")
+    {
+        targetId = null;
+        targetType = "area";
+        Debug.Log($"✅ Area skill - no specific target needed");
+    }
+
+    // ✅ Cria request
+    var request = new
+    {
+        type = "useSkill",
+        skillId = skill.skillId,
+        slotNumber = skill.slotNumber,
+        targetId = targetId, // ⚠️ PODE SER NULL PARA AREA SKILLS
+        targetType = targetType ?? "monster",
+        targetPosition = (object)null
+    };
+
+    string json = JsonConvert.SerializeObject(request);
+    
+    // 🔍 DEBUG
+    Debug.Log($"📤 SENDING useSkill:");
+    Debug.Log($"   Skill: {skill.template.name} (ID: {skill.skillId})");
+    Debug.Log($"   Target ID: {targetId ?? "NULL"}");
+    Debug.Log($"   Target Type: {targetType ?? "NULL"}");
+
+    ClientManager.Instance.SendMessage(json);
+
+    // Atualiza cooldown localmente (otimista)
+    skill.lastUsedTime = (long)(Time.time * 1000);
+    cooldownTimers[skill.skillId] = Time.time;
+
+    if (SkillbarUI.Instance != null)
+    {
+        SkillbarUI.Instance.UpdateCooldown(skill.slotNumber, skill.template.cooldown);
+    }
+
+    Debug.Log($"✅ Skill request sent successfully");
+}
+
+        /// <summary>
+        /// Processa mensagens de skill do servidor
+        /// </summary>
+        private void HandleSkillMessages(string message)
+        {
+            try
+            {
+                var json = Newtonsoft.Json.Linq.JObject.Parse(message);
+                var type = json["type"]?.ToString();
+
+                switch (type)
+                {
+                    case "skillUsed":
+                        HandleSkillUsed(json);
+                        break;
+
+                    case "skillUseFailed":
+                        HandleSkillUseFailed(json);
+                        break;
+
+                    case "skillLearned":
+                        HandleSkillLearned(json);
+                        break;
+
+                    case "skillLeveledUp":
+                        HandleSkillLeveledUp(json);
+                        break;
+                }
+            }
+            catch (System.Exception ex)
+            {
+                Debug.LogError($"Error handling skill message: {ex.Message}");
+            }
+        }
+
+        private void HandleSkillUsed(Newtonsoft.Json.Linq.JObject json)
+        {
+            var result = json["result"]?.ToObject<SkillResult>();
+            
+            if (result == null)
+                return;
+
+            Debug.Log($"⚔️ Skill result: {result.attackerName} - Success: {result.success}");
+
+            // Atualiza MP/HP local
+            if (result.attackerId == ClientManager.Instance.PlayerId)
+            {
+                var charData = WorldManager.Instance?.GetLocalCharacterData();
+                
+                if (charData != null)
+                {
+                    charData.mana -= result.manaCost;
+                    charData.health -= result.healthCost;
+
+                    if (UIManager.Instance != null)
+                    {
+                        UIManager.Instance.UpdateManaBar(charData.mana, charData.maxMana);
+                        UIManager.Instance.UpdateHealthBar(charData.health, charData.maxHealth);
+                    }
+                }
+            }
+
+            // Mostra dano nos alvos
+            if (result.targets != null)
+            {
+                foreach (var target in result.targets)
+                {
+                    if (target.damage > 0)
+                    {
+                        // Encontra monstro e mostra dano
+                        var monsterObj = GameObject.Find($"Monster_{target.targetName}_{target.targetId}");
+                        
+                        if (monsterObj != null)
+                        {
+                            var monster = monsterObj.GetComponent<MonsterController>();
+                            monster?.ShowDamage(target.damage, target.isCritical);
+                        }
+
+                        if (UIManager.Instance != null)
+                        {
+                            string critText = target.isCritical ? " <color=red>CRÍTICO!</color>" : "";
+                            UIManager.Instance.AddCombatLog($"<color=orange>⚔️ Causou {target.damage}{critText} em {target.targetName}</color>");
+                        }
+                    }
+                }
+            }
+        }
+
+        private void HandleSkillUseFailed(Newtonsoft.Json.Linq.JObject json)
+        {
+            var skillId = json["skillId"]?.ToObject<int>() ?? 0;
+            var reason = json["reason"]?.ToString() ?? "";
+
+            string message = reason switch
+            {
+                "COOLDOWN" => "⏳ Skill em cooldown!",
+                "NO_MANA" => "💧 Mana insuficiente!",
+                "NO_HEALTH" => "❤️ HP insuficiente!",
+                "OUT_OF_RANGE" => "📏 Alvo muito longe!",
+                "SKILL_NOT_LEARNED" => "📚 Skill não aprendida!",
+                _ => $"⚠️ Não pode usar skill ({reason})"
+            };
+
+            if (UIManager.Instance != null)
+            {
+                UIManager.Instance.AddCombatLog($"<color=yellow>{message}</color>");
+            }
+
+            Debug.LogWarning($"Skill {skillId} failed: {reason}");
+        }
+
+        private void HandleSkillLearned(Newtonsoft.Json.Linq.JObject json)
+        {
+            bool success = json["success"]?.ToObject<bool>() ?? false;
+            
+            if (success)
+            {
+                string skillName = json["skillName"]?.ToString() ?? "Skill";
+                int slotNumber = json["slotNumber"]?.ToObject<int>() ?? 0;
+
+                if (UIManager.Instance != null)
+                {
+                    UIManager.Instance.AddCombatLog($"<color=lime>✅ Aprendeu {skillName} (Slot {slotNumber})!</color>");
+                }
+
+                // Recarrega skills
+                RequestSkills();
+            }
+        }
+
+        private void HandleSkillLeveledUp(Newtonsoft.Json.Linq.JObject json)
+        {
+            bool success = json["success"]?.ToObject<bool>() ?? false;
+            
+            if (success)
+            {
+                int newLevel = json["newLevel"]?.ToObject<int>() ?? 1;
+
+                if (UIManager.Instance != null)
+                {
+                    UIManager.Instance.AddCombatLog($"<color=cyan>⬆️ Skill evoluiu para nível {newLevel}!</color>");
+                }
+
+                RequestSkills();
+            }
+        }
+
+        /// <summary>
+        /// Solicita skills do servidor
+        /// </summary>
+        public void RequestSkills()
+        {
+            var message = new { type = "getSkills" };
+            string json = JsonConvert.SerializeObject(message);
+            ClientManager.Instance.SendMessage(json);
+        }
+
+        /// <summary>
+        /// Obtém skill por slot
+        /// </summary>
+        public LearnedSkill GetSkillInSlot(int slotNumber)
+        {
+            skillSlots.TryGetValue(slotNumber, out var skill);
+            return skill;
+        }
+
+        /// <summary>
+        /// Obtém todas as skills
+        /// </summary>
+        public List<LearnedSkill> GetAllSkills()
+        {
+            return learnedSkills;
+        }
+
+        private void OnDestroy()
+        {
+            if (MessageHandler.Instance != null)
+            {
+                MessageHandler.Instance.OnMessageReceived -= HandleSkillMessages;
+            }
+        }
+		
+		
+		/// <summary>
+/// Helper para pegar o player local - VERSÃO MELHORADA
+/// </summary>
+private PlayerController GetLocalPlayer()
+{
+    // Método 1: Busca por Tag
+    var localPlayerObj = GameObject.FindGameObjectWithTag("Player");
+    
+    if (localPlayerObj != null)
+    {
+        var player = localPlayerObj.GetComponent<PlayerController>();
+        
+        if (player != null && player.isLocalPlayer)
+        {
+            Debug.Log($"✅ Found local player: {player.characterName}");
+            return player;
+        }
+    }
+
+    // Método 2: Busca por isLocalPlayer
+    var allPlayers = FindObjectsOfType<PlayerController>();
+    
+    foreach (var player in allPlayers)
+    {
+        if (player.isLocalPlayer)
+        {
+            Debug.Log($"✅ Found local player (search): {player.characterName}");
+            return player;
+        }
+    }
+
+    // Método 3: Via WorldManager
+    if (WorldManager.Instance != null)
+    {
+        var charData = WorldManager.Instance.GetLocalCharacterData();
+        
+        if (charData != null)
+        {
+            Debug.Log($"🔍 Searching for player by character name: {charData.nome}");
+            
+            foreach (var player in allPlayers)
+            {
+                if (player.characterName == charData.nome)
+                {
+                    Debug.Log($"✅ Found local player by name: {player.characterName}");
+                    return player;
+                }
+            }
+        }
+    }
+
+    Debug.LogError("❌ GetLocalPlayer: Could not find local player using any method!");
+    Debug.LogError($"   Total PlayerControllers in scene: {allPlayers.Length}");
+    
+    foreach (var p in allPlayers)
+    {
+        Debug.LogError($"   - Player: {p.characterName}, isLocal: {p.isLocalPlayer}, Tag: {p.tag}");
+    }
+
+    return null;
+}
     }
 }
