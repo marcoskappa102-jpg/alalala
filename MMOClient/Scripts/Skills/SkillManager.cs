@@ -174,7 +174,63 @@ namespace MMOClient.Skills
                 }
             }
 
-            return true;
+    // ✅ NOVO: Valida range para skills de target único
+    if (skill.template.targetType == "enemy")
+    {
+        var player = GetLocalPlayer();
+        
+        if (player == null)
+        {
+            Debug.LogError("❌ CanUseSkill: Player not found!");
+            return false;
+        }
+
+        if (!player.targetMonsterId.HasValue)
+        {
+            if (UIManager.Instance != null)
+            {
+                UIManager.Instance.AddCombatLog($"<color=red>⚠️ Selecione um alvo primeiro!</color>");
+            }
+            return false;
+        }
+
+        // Verifica se o monstro ainda existe
+        var monsterObj = GameObject.Find($"Monster_{player.targetMonsterId.Value}");
+        
+        if (monsterObj == null)
+        {
+            if (UIManager.Instance != null)
+            {
+                UIManager.Instance.AddCombatLog($"<color=red>⚠️ Alvo não encontrado!</color>");
+            }
+            return false;
+        }
+
+        var monster = monsterObj.GetComponent<MonsterController>();
+        
+        if (monster == null || !monster.isAlive)
+        {
+            if (UIManager.Instance != null)
+            {
+                UIManager.Instance.AddCombatLog($"<color=red>⚠️ Alvo está morto!</color>");
+            }
+            return false;
+        }
+
+        // Verifica range
+        float distance = Vector3.Distance(player.transform.position, monster.transform.position);
+        
+        if (distance > skill.template.range)
+        {
+            if (UIManager.Instance != null)
+            {
+                UIManager.Instance.AddCombatLog($"<color=orange>⚠️ Alvo muito longe! ({distance:F1}m / {skill.template.range}m)</color>");
+            }
+            return false;
+        }
+    }
+
+    return true;
         }
 
         /// <summary>
@@ -272,7 +328,7 @@ private void ExecuteSkill(LearnedSkill skill)
     Debug.Log($"🔍 ExecuteSkill: {skill.template.name} (Type: {skill.template.targetType})");
 
     // ✅ CORREÇÃO: Validação melhorada de target
-    if (skill.template.targetType == "Monster")
+    if (skill.template.targetType == "enemy") // ✅ MUDOU DE "Monster" PARA "enemy"
     {
         // Pega target atual do player
         var player = GetLocalPlayer();
@@ -280,6 +336,7 @@ private void ExecuteSkill(LearnedSkill skill)
         if (player == null)
         {
             Debug.LogError("❌ Local player not found!");
+            
             if (UIManager.Instance != null)
             {
                 UIManager.Instance.AddCombatLog($"<color=red>⚠️ Erro: Jogador não encontrado!</color>");
@@ -289,21 +346,20 @@ private void ExecuteSkill(LearnedSkill skill)
 
         Debug.Log($"🎯 Player target monster ID: {player.targetMonsterId}");
 
-        if (player.targetMonsterId.HasValue)
-        {
-            targetId = player.targetMonsterId.Value.ToString();
-            targetType = "monster";
-            Debug.Log($"✅ Target found: Monster ID {targetId}");
-        }
-        else
+        if (!player.targetMonsterId.HasValue)
         {
             Debug.LogWarning($"⚠️ No target selected for skill {skill.template.name}");
+            
             if (UIManager.Instance != null)
             {
-                UIManager.Instance.AddCombatLog($"<color=red>⚠️ Nenhum alvo selecionado!</color>");
+                UIManager.Instance.AddCombatLog($"<color=red>⚠️ Selecione um alvo primeiro!</color>");
             }
             return;
         }
+
+        targetId = player.targetMonsterId.Value.ToString();
+        targetType = "monster";
+        Debug.Log($"✅ Target found: Monster ID {targetId}");
     }
     else if (skill.template.targetType == "self")
     {
@@ -314,6 +370,11 @@ private void ExecuteSkill(LearnedSkill skill)
             targetId = player.playerId;
             targetType = "player";
             Debug.Log($"✅ Self-target: Player {targetId}");
+        }
+        else
+        {
+            Debug.LogError("❌ Local player not found for self-target skill!");
+            return;
         }
     }
     else if (skill.template.targetType == "area")
@@ -359,14 +420,6 @@ private void ExecuteSkill(LearnedSkill skill)
     }
 
     Debug.Log($"✅ Skill request sent successfully");
-}
-/// <summary>
-/// Helper para pegar o player local
-/// </summary>
-private PlayerController GetLocalPlayer()
-{
-    var localPlayerObj = GameObject.FindGameObjectWithTag("Player");
-    return localPlayerObj?.GetComponent<PlayerController>();
 }
 
         /// <summary>
@@ -550,5 +603,68 @@ private PlayerController GetLocalPlayer()
                 MessageHandler.Instance.OnMessageReceived -= HandleSkillMessages;
             }
         }
+		
+		
+		/// <summary>
+/// Helper para pegar o player local - VERSÃO MELHORADA
+/// </summary>
+private PlayerController GetLocalPlayer()
+{
+    // Método 1: Busca por Tag
+    var localPlayerObj = GameObject.FindGameObjectWithTag("Player");
+    
+    if (localPlayerObj != null)
+    {
+        var player = localPlayerObj.GetComponent<PlayerController>();
+        
+        if (player != null && player.isLocalPlayer)
+        {
+            Debug.Log($"✅ Found local player: {player.characterName}");
+            return player;
+        }
+    }
+
+    // Método 2: Busca por isLocalPlayer
+    var allPlayers = FindObjectsOfType<PlayerController>();
+    
+    foreach (var player in allPlayers)
+    {
+        if (player.isLocalPlayer)
+        {
+            Debug.Log($"✅ Found local player (search): {player.characterName}");
+            return player;
+        }
+    }
+
+    // Método 3: Via WorldManager
+    if (WorldManager.Instance != null)
+    {
+        var charData = WorldManager.Instance.GetLocalCharacterData();
+        
+        if (charData != null)
+        {
+            Debug.Log($"🔍 Searching for player by character name: {charData.nome}");
+            
+            foreach (var player in allPlayers)
+            {
+                if (player.characterName == charData.nome)
+                {
+                    Debug.Log($"✅ Found local player by name: {player.characterName}");
+                    return player;
+                }
+            }
+        }
+    }
+
+    Debug.LogError("❌ GetLocalPlayer: Could not find local player using any method!");
+    Debug.LogError($"   Total PlayerControllers in scene: {allPlayers.Length}");
+    
+    foreach (var p in allPlayers)
+    {
+        Debug.LogError($"   - Player: {p.characterName}, isLocal: {p.isLocalPlayer}, Tag: {p.tag}");
+    }
+
+    return null;
+}
     }
 }
