@@ -1030,6 +1030,10 @@ private static string HandleUseSkill(JObject json, string sessionId)
                 "SKILL_NOT_LEARNED" => "Você não aprendeu esta skill!",
                 "INVALID_LEVEL" => "Nível de skill inválido!",
                 "SKILL_NOT_FOUND" => "Skill não encontrada!",
+                "NO_TARGET" => "Selecione um alvo primeiro!",          // ✅ NOVO
+                "TARGET_NOT_FOUND" => "Alvo não encontrado!",           // ✅ NOVO
+                "TARGET_DEAD" => "Alvo já está morto!",                 // ✅ NOVO
+                "INVALID_TARGET" => "Alvo inválido!",                   // ✅ NOVO
                 _ => $"Não foi possível usar a skill ({result.failReason})"
             };
 
